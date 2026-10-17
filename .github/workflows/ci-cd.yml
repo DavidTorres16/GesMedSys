@@ -1,0 +1,134 @@
+name: CI/CD GesMedSys
+
+# Pipeline: pruebas unitarias e integración -> imagen Docker + despliegue de
+# staging en el runner con prueba de humo -> (opcional) despliegue a Cloud Run.
+on:
+  push:
+    branches: [main, 'claude/**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '20'
+  IMAGE_NAME: gesmedsys
+
+jobs:
+  test:
+    name: 1. Pruebas unitarias e integración
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Ejecutar pruebas con cobertura
+        run: npm run test:ci
+
+      - name: Publicar resumen de cobertura
+        if: always()
+        run: |
+          echo "## Cobertura de pruebas" >> "$GITHUB_STEP_SUMMARY"
+          node -e "const s=require('./coverage/coverage-summary.json').total;for(const k of ['lines','statements','functions','branches'])console.log('- '+k+': '+s[k].pct+' %')" >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Guardar reportes (JUnit y cobertura)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reportes-pruebas
+          path: |
+            reports/junit.xml
+            coverage/
+          retention-days: 14
+
+  build-deploy-staging:
+    name: 2. Build y despliegue de staging
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      JWT_SECRET: staging-${{ github.run_id }}
+      SEED_PASSWORD: ${{ secrets.SEED_PASSWORD || 'StagingDemo2026' }}
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v4
+
+      - name: Construir imagen Docker
+        run: docker build -t $IMAGE_NAME:${{ github.sha }} .
+
+      - name: Desplegar contenedor (staging en el runner)
+        run: |
+          docker run -d --name gesmedsys -p 8080:8080 \
+            -e JWT_SECRET -e SEED_PASSWORD \
+            -e APP_VERSION=${{ github.sha }} \
+            $IMAGE_NAME:${{ github.sha }}
+
+      - name: Prueba de humo
+        run: BASE_URL=http://localhost:8080 ./scripts/smoke-test.sh
+
+      - name: Logs del contenedor
+        if: always()
+        run: docker logs gesmedsys || true
+
+      - name: Exportar imagen como artefacto
+        run: docker save $IMAGE_NAME:${{ github.sha }} | gzip > gesmedsys-image.tar.gz
+
+      - name: Guardar imagen
+        uses: actions/upload-artifact@v4
+        with:
+          name: imagen-docker
+          path: gesmedsys-image.tar.gz
+          retention-days: 7
+
+  deploy-gcp:
+    name: 3. Despliegue a Google Cloud Run (opcional)
+    needs: build-deploy-staging
+    # Solo en main y cuando el repositorio tiene configurada la variable GCP_PROJECT_ID.
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.GCP_PROJECT_ID != ''
+    runs-on: ubuntu-latest
+    environment: produccion
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v4
+
+      - name: Autenticarse en Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Configurar gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Desplegar en Cloud Run
+        id: deploy
+        run: |
+          gcloud run deploy gesmedsys \
+            --project "${{ vars.GCP_PROJECT_ID }}" \
+            --region "${{ vars.GCP_REGION || 'us-central1' }}" \
+            --source . \
+            --allow-unauthenticated \
+            --set-env-vars APP_VERSION=${{ github.sha }} \
+            --set-secrets JWT_SECRET=jwt-secret:latest,SEED_PASSWORD=seed-password:latest \
+            --quiet
+          URL=$(gcloud run services describe gesmedsys \
+            --project "${{ vars.GCP_PROJECT_ID }}" \
+            --region "${{ vars.GCP_REGION || 'us-central1' }}" \
+            --format 'value(status.url)')
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Desplegado en: $URL" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Prueba de humo en producción
+        env:
+          BASE_URL: ${{ steps.deploy.outputs.url }}
+          SEED_PASSWORD: ${{ secrets.SEED_PASSWORD }}
+        run: ./scripts/smoke-test.sh
