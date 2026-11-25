@@ -1,5 +1,5 @@
 # Imagen de producción: solo dependencias de ejecución, usuario sin privilegios.
-FROM node:20-alpine
+FROM node:22-alpine
 ENV NODE_ENV=production PORT=8080
 WORKDIR /app
 COPY package.json package-lock.json ./

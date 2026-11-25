@@ -2,7 +2,7 @@
 title: "Documento Técnico — Pipeline de Despliegue y Ejecución Automatizada de Pruebas Unitarias"
 subtitle: "Sistema de Gestión de Citas Médicas (GesMedSys)"
 author: "Marlon Andrés Campo · David Mauricio Torres"
-date: "Octubre de 2026 — Versión 1.0"
+date: "Noviembre de 2026 — Versión 1.1"
 lang: es
 ---
 
@@ -53,12 +53,12 @@ Se seleccionó **JavaScript sobre Node.js** por las siguientes razones:
 
 | Criterio | Decisión | Justificación |
 |---|---|---|
-| Lenguaje | JavaScript (Node.js 20 LTS) | Aceptado por el RFP; un solo lenguaje para backend y el frontend React sugerido. |
+| Lenguaje | JavaScript (Node.js 22 LTS) | Aceptado por el RFP; un solo lenguaje para backend y el frontend React sugerido. |
 | Framework web | Express 4 | Sugerido explícitamente por el RFP ("Node.js (Express)"); mínimo y fácil de probar. |
 | Pruebas unitarias | Jest 29 | Mencionado en el Plan de Pruebas ("Jest/Vitest en JavaScript"); incluye *mocks*, aserciones y cobertura sin dependencias extra. |
 | Pruebas de caja negra | Supertest 7 | Ejecuta peticiones HTTP reales contra la API dentro del mismo proceso, sin levantar un servidor externo. |
 | Seguridad | `jsonwebtoken`, `bcryptjs` | Cumplen "sesión con JWT" y "contraseñas cifradas (hash)" del RFP. |
-| Contenedor | Docker (`node:20-alpine`) | Mismo artefacto en staging y producción; requisito de Cloud Run. |
+| Contenedor | Docker (`node:22-alpine`) | Mismo artefacto en staging y producción; requisito de Cloud Run. |
 | CI/CD | GitHub Actions | Opción indicada por el RFP; integrada con el repositorio en GitHub. |
 | Nube | Google Cloud Run | Infraestructura marcada en el RFP (Google Cloud); provee HTTPS automáticamente. |
 
@@ -185,12 +185,12 @@ disponibilidad, la ocupación es 0 %.
 
 ## 5.3 Resultado de referencia
 
-Ejecución local de `npm run test:ci` (Node.js 22, octubre de 2026):
+Ejecución local de `npm run test:ci` (Node.js 22, noviembre de 2026):
 
 | Métrica | Valor |
 |---|---|
 | Suites de prueba | 7 aprobadas de 7 |
-| Casos de prueba | 49 aprobados de 49 (38 unitarios, 11 de integración que agrupan CN-01 a CN-22) |
+| Casos de prueba | 50 aprobados de 50 (38 unitarios, 12 de integración que agrupan CN-01 a CN-22) |
 | Cobertura de líneas | 96,77 % (umbral mínimo configurado: 80 %) |
 | Cobertura de funciones | 96,03 % |
 | Tiempo total | ≈ 7 s |
@@ -201,7 +201,7 @@ Ejecución local de `npm run test:ci` (Node.js 22, octubre de 2026):
 
 El archivo `.github/workflows/ci-cd.yml` se ejecuta cuando:
 
-- se hace `push` a `main` o a ramas de trabajo `claude/**`;
+- se hace `push` a cualquier rama (`'**'`), lo que permite probar cambios en ramas de trabajo;
 - se abre o actualiza un *pull request* hacia `main`;
 - se lanza manualmente desde la pestaña **Actions** (`workflow_dispatch`).
 
@@ -212,8 +212,8 @@ El archivo `.github/workflows/ci-cd.yml` se ejecuta cuando:
     |
     v
 +--------------------------+   falla   +---------------------------+
-| 1. Pruebas unitarias e   |---------->| Pipeline detenido (rojo)  |
-|    integración (Jest)    |           | Reporte JUnit disponible  |
+| 1. Pruebas unitarias y   |---------->| Pipeline detenido (rojo)  |
+|    de caja negra (Jest)  |           | Reporte JUnit disponible  |
 +--------------------------+           +---------------------------+
     | OK (cobertura >= 80 %)
     v
@@ -233,16 +233,20 @@ El archivo `.github/workflows/ci-cd.yml` se ejecuta cuando:
 Cada etapa depende de la anterior (`needs:`), por lo que **ningún código que rompa las
 pruebas llega a desplegarse**.
 
-## 6.3 Etapa 1 — Pruebas unitarias e integración
+## 6.3 Etapa 1 — Pruebas unitarias y de caja negra
 
 | Paso | Acción | Propósito |
 |---|---|---|
-| Descargar código | `actions/checkout@v4` | Obtener la versión exacta del commit. |
-| Configurar Node.js | `actions/setup-node@v4` (v20, caché npm) | Entorno idéntico en cada ejecución. |
+| Descargar código | `actions/checkout@v5` | Obtener la versión exacta del commit. |
+| Configurar Node.js | `actions/setup-node@v5` (`NODE_VERSION` = 22, caché npm) | Entorno idéntico en cada ejecución. |
 | Instalar dependencias | `npm ci` | Instalación reproducible desde `package-lock.json`. |
-| Ejecutar pruebas | `npm run test:ci` | Jest en modo CI con cobertura y reporte JUnit. Falla si una prueba falla o la cobertura de líneas < 80 %. |
-| Resumen | Escribe la cobertura en el *Job Summary* | Visible en la página de la ejecución. |
-| Guardar reportes | `actions/upload-artifact@v4` | `reports/junit.xml` y `coverage/` como evidencia descargable (14 días). |
+| Pruebas unitarias (PU-01 a PU-18) | `npm run test:unit:ci` | Ejecuta solo `tests/unit` y genera `reports/junit-unitarias.xml`. Si una prueba falla, la etapa queda en rojo. |
+| Pruebas de caja negra (CN-01 a CN-22) | `npm run test:integration:ci` | Se ejecuta aunque fallen las unitarias, para que el reporte quede completo. Genera `reports/junit-caja-negra.xml`. |
+| Cobertura de código | `npm run test:ci` con `COVERAGE_MIN` | Solo si los dos pasos anteriores pasaron. Falla si la cobertura de líneas es menor a `COVERAGE_MIN` (80 %). |
+| Resumen de resultados | `scripts/resumen-pruebas.js` | Publica en el *Job Summary* la tabla de aprobadas/fallidas por nivel, la lista de fallas con su motivo, los casos del Plan cubiertos y la cobertura. Cada falla también se publica como anotación de error. |
+| Guardar reportes | `actions/upload-artifact@v4` | `reports/` y `coverage/` como evidencia descargable (14 días). |
+
+Parámetros configurables en el bloque `env:` del workflow: `NODE_VERSION` (22), `COVERAGE_MIN` (80) e `IMAGE_NAME` (`gesmedsys`). La guía `GUIA_EVALUACION.md` describe cómo cambiarlos.
 
 ## 6.4 Etapa 2 — Build y despliegue de staging
 
@@ -356,6 +360,10 @@ Para evidenciar que el pipeline bloquea código defectuoso, se recomienda:
 2. Hacer `push`. La etapa 1 falla en **PU-09** (citas contiguas) y en el caso de
    integración **CN-08 a CN-12** (aserción de CN-11); las etapas 2 y 3 no se ejecutan.
 3. Revertir el cambio y hacer `push`: el pipeline vuelve a verde.
+
+También puede modificarse directamente la aserción de una prueba unitaria (por ejemplo PU-08);
+el paso **Pruebas unitarias (PU-01 a PU-18)** queda en rojo y el *Job Summary* lista la prueba
+fallida con su motivo. El procedimiento completo está en `GUIA_EVALUACION.md`, sección 6.
 
 # 9. Evidencias y relación con el Plan de Pruebas
 

@@ -126,6 +126,28 @@ describe('API REST - pruebas de caja negra', () => {
     expect(reporte.body).toMatchObject({ availableMinutes: 240, occupiedMinutes: 60, percentage: 25 });
   });
 
+  test('CN-17 historial por médico: solo citas del profesional, con sus estados', async () => {
+    const { pacienteId, medicoId } = await seedAgenda();
+    const otro = await request(app).post('/api/medicos').set(as('admin'))
+      .send({ nombre: 'Dr. Gil', especialidad: 'Medicina general' });
+    await request(app).post(`/api/medicos/${otro.body.id}/disponibilidad`).set(as('admin'))
+      .send({ start: '2026-11-03T13:00:00Z', end: '2026-11-03T17:00:00Z' });
+
+    const cita = (doctorId, start, end) => request(app).post('/api/citas').set(as('recepcion'))
+      .send({ patientId: pacienteId, doctorId, start, end });
+    const cancelada = await cita(medicoId, '2026-11-03T13:00:00Z', '2026-11-03T13:30:00Z');
+    await cita(medicoId, '2026-11-03T14:00:00Z', '2026-11-03T14:30:00Z');
+    await cita(otro.body.id, '2026-11-03T15:00:00Z', '2026-11-03T15:30:00Z');
+    await request(app).post(`/api/citas/${cancelada.body.id}/cancelar`).set(as('recepcion'))
+      .send({ motivo: 'Paciente no puede asistir' });
+
+    const res = await request(app).get(`/api/medicos/${medicoId}/citas`).set(as('medico'));
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(2);
+    expect(res.body.every((c) => c.doctorId === medicoId)).toBe(true);
+    expect(res.body.map((c) => c.status).sort()).toEqual(['CANCELADA', 'PROGRAMADA']);
+  });
+
   test('CN-19 sin JWT válido responde 401', async () => {
     expect((await request(app).get('/api/pacientes')).status).toBe(401);
     expect((await request(app).get('/api/pacientes').set('Authorization', 'Bearer x.y.z')).status).toBe(401);

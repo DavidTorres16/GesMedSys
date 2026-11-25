@@ -5,14 +5,17 @@
   "main": "src/server.js",
   "private": true,
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "start": "node src/server.js",
     "test": "jest",
     "test:unit": "jest tests/unit",
     "test:integration": "jest tests/integration",
-    "test:ci": "jest --ci --coverage --reporters=default --reporters=jest-junit"
+    "test:unit:ci": "jest tests/unit --ci --reporters=default --reporters=jest-junit",
+    "test:integration:ci": "jest tests/integration --ci --reporters=default --reporters=jest-junit",
+    "test:ci": "jest --ci --coverage --reporters=default --reporters=jest-junit",
+    "test:resumen": "node scripts/resumen-pruebas.js \"Pruebas unitarias=reports/junit-unitarias.xml\" \"Pruebas de caja negra=reports/junit-caja-negra.xml\""
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -43,6 +46,9 @@
   },
   "jest-junit": {
     "outputDirectory": "reports",
-    "outputName": "junit.xml"
+    "outputName": "junit.xml",
+    "suiteNameTemplate": "{filepath}",
+    "classNameTemplate": "{classname}",
+    "titleTemplate": "{title}"
   }
 }

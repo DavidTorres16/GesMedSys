@@ -5,7 +5,11 @@ citas, historial y reportes de ocupación, con autenticación JWT, roles y audit
 
 ![CI/CD](https://github.com/DavidTorres16/GesMedSys/actions/workflows/ci-cd.yml/badge.svg)
 
+> **Para evaluar el proyecto:** siga la [Guía de instalación, configuración y ejecución del pipeline](GUIA_EVALUACION.md).
+
 ## Inicio rápido
+
+Requiere Node.js 22 LTS.
 
 ```bash
 npm ci
@@ -28,9 +32,11 @@ Usuarios semilla ficticios: `admin`, `recepcion`, `medico` (clave = `SEED_PASSWO
 
 `.github/workflows/ci-cd.yml`:
 
-1. **Pruebas** — Jest con cobertura (mínimo 80 % de líneas) y reporte JUnit.
+1. **Pruebas** — unitarias (PU-01 a PU-18) y de caja negra (CN-01 a CN-22) en pasos separados,
+   cobertura mínima de 80 % de líneas, reporte JUnit y tabla de resultados en el resumen de la ejecución.
 2. **Build y staging** — imagen Docker, contenedor en el runner y prueba de humo.
 3. **Cloud Run (opcional)** — solo en `main` cuando existe la variable `GCP_PROJECT_ID`.
 
-Detalle completo en [docs/Documento_Tecnico_Pipeline_CI_CD.md](docs/Documento_Tecnico_Pipeline_CI_CD.md)
-(también en formato Word: `docs/Documento_Tecnico_Pipeline_CI_CD.docx`).
+Se ejecuta con cada `push` a cualquier rama, con cada pull request hacia `main` y manualmente
+desde la pestaña **Actions**. Detalle completo en
+[docs/Documento_Tecnico_Pipeline_CI_CD.md](docs/Documento_Tecnico_Pipeline_CI_CD.md).

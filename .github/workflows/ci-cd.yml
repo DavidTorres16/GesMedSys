@@ -1,55 +1,80 @@
 name: CI/CD GesMedSys
 
-# Pipeline: pruebas unitarias e integración -> imagen Docker + despliegue de
-# staging en el runner con prueba de humo -> (opcional) despliegue a Cloud Run.
+# Pipeline definido en docs/Documento_Tecnico_Pipeline_CI_CD.md:
+#   1. Pruebas unitarias (PU-01..PU-18) y de caja negra (CN-01..CN-22) + cobertura
+#   2. Imagen Docker + despliegue de staging en el runner + prueba de humo
+#   3. (Opcional) despliegue a Google Cloud Run
+# Si una prueba falla, la etapa 1 queda en rojo y las etapas 2 y 3 no se ejecutan.
 on:
   push:
-    branches: [main, 'claude/**']
+    branches: ['**']          # cualquier rama: el docente puede probar en la suya
   pull_request:
     branches: [main]
-  workflow_dispatch:
+  workflow_dispatch:          # botón "Run workflow" en la pestaña Actions
 
 permissions:
   contents: read
 
+# Parámetros del pipeline (ver GUIA_EVALUACION.md, sección 5).
 env:
-  NODE_VERSION: '20'
-  IMAGE_NAME: gesmedsys
+  NODE_VERSION: '22'          # versión de Node.js usada en las pruebas
+  COVERAGE_MIN: '80'          # % mínimo de líneas cubiertas para aprobar la etapa 1
+  IMAGE_NAME: gesmedsys       # nombre de la imagen Docker de staging
 
 jobs:
   test:
-    name: 1. Pruebas unitarias e integración
+    name: 1. Pruebas unitarias y de caja negra
     runs-on: ubuntu-latest
     steps:
       - name: Descargar código
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Configurar Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
 
       - name: Instalar dependencias
+        id: deps
         run: npm ci
 
-      - name: Ejecutar pruebas con cobertura
-        run: npm run test:ci
+      - name: Pruebas unitarias (PU-01 a PU-18)
+        id: unitarias
+        env:
+          JEST_JUNIT_OUTPUT_NAME: junit-unitarias.xml
+        run: npm run test:unit:ci
 
-      - name: Publicar resumen de cobertura
-        if: always()
+      # Se ejecutan aunque fallen las unitarias, para tener el reporte completo.
+      - name: Pruebas de caja negra (CN-01 a CN-22)
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
+        env:
+          JEST_JUNIT_OUTPUT_NAME: junit-caja-negra.xml
+        run: npm run test:integration:ci
+
+      - name: Cobertura de código (mínimo ${{ env.COVERAGE_MIN }} % de líneas)
+        env:
+          JEST_JUNIT_OUTPUT_NAME: junit-completo.xml
+        run: npm run test:ci -- --coverageThreshold="{\"global\":{\"lines\":${COVERAGE_MIN}}}"
+
+      - name: Resumen de resultados
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
         run: |
-          echo "## Cobertura de pruebas" >> "$GITHUB_STEP_SUMMARY"
-          node -e "const s=require('./coverage/coverage-summary.json').total;for(const k of ['lines','statements','functions','branches'])console.log('- '+k+': '+s[k].pct+' %')" >> "$GITHUB_STEP_SUMMARY" || true
+          npm run -s test:resumen
+          if [ -f coverage/coverage-summary.json ]; then
+            echo "## Cobertura de código (mínimo ${COVERAGE_MIN} % de líneas)" >> "$GITHUB_STEP_SUMMARY"
+            node -e "const s=require('./coverage/coverage-summary.json').total;for(const k of ['lines','statements','functions','branches'])console.log('- '+k+': '+s[k].pct+' %')" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Guardar reportes (JUnit y cobertura)
-        if: always()
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: reportes-pruebas
           path: |
-            reports/junit.xml
+            reports/
             coverage/
+          if-no-files-found: ignore
           retention-days: 14
 
   build-deploy-staging:
@@ -61,7 +86,7 @@ jobs:
       SEED_PASSWORD: ${{ secrets.SEED_PASSWORD || 'StagingDemo2026' }}
     steps:
       - name: Descargar código
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Construir imagen Docker
         run: docker build -t $IMAGE_NAME:${{ github.sha }} .
@@ -99,7 +124,7 @@ jobs:
     environment: produccion
     steps:
       - name: Descargar código
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Autenticarse en Google Cloud
         uses: google-github-actions/auth@v2
