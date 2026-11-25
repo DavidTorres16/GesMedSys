@@ -1,0 +1,159 @@
+name: CI/CD GesMedSys
+
+# Pipeline definido en docs/Documento_Tecnico_Pipeline_CI_CD.md:
+#   1. Pruebas unitarias (PU-01..PU-18) y de caja negra (CN-01..CN-22) + cobertura
+#   2. Imagen Docker + despliegue de staging en el runner + prueba de humo
+#   3. (Opcional) despliegue a Google Cloud Run
+# Si una prueba falla, la etapa 1 queda en rojo y las etapas 2 y 3 no se ejecutan.
+on:
+  push:
+    branches: ['**']          # cualquier rama: el docente puede probar en la suya
+  pull_request:
+    branches: [main]
+  workflow_dispatch:          # botón "Run workflow" en la pestaña Actions
+
+permissions:
+  contents: read
+
+# Parámetros del pipeline (ver GUIA_EVALUACION.md, sección 5).
+env:
+  NODE_VERSION: '22'          # versión de Node.js usada en las pruebas
+  COVERAGE_MIN: '80'          # % mínimo de líneas cubiertas para aprobar la etapa 1
+  IMAGE_NAME: gesmedsys       # nombre de la imagen Docker de staging
+
+jobs:
+  test:
+    name: 1. Pruebas unitarias y de caja negra
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v5
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Instalar dependencias
+        id: deps
+        run: npm ci
+
+      - name: Pruebas unitarias (PU-01 a PU-18)
+        id: unitarias
+        env:
+          JEST_JUNIT_OUTPUT_NAME: junit-unitarias.xml
+        run: npm run test:unit:ci
+
+      # Se ejecutan aunque fallen las unitarias, para tener el reporte completo.
+      - name: Pruebas de caja negra (CN-01 a CN-22)
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
+        env:
+          JEST_JUNIT_OUTPUT_NAME: junit-caja-negra.xml
+        run: npm run test:integration:ci
+
+      - name: Cobertura de código (mínimo ${{ env.COVERAGE_MIN }} % de líneas)
+        env:
+          JEST_JUNIT_OUTPUT_NAME: junit-completo.xml
+        run: npm run test:ci -- --coverageThreshold="{\"global\":{\"lines\":${COVERAGE_MIN}}}"
+
+      - name: Resumen de resultados
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
+        run: |
+          npm run -s test:resumen
+          if [ -f coverage/coverage-summary.json ]; then
+            echo "## Cobertura de código (mínimo ${COVERAGE_MIN} % de líneas)" >> "$GITHUB_STEP_SUMMARY"
+            node -e "const s=require('./coverage/coverage-summary.json').total;for(const k of ['lines','statements','functions','branches'])console.log('- '+k+': '+s[k].pct+' %')" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Guardar reportes (JUnit y cobertura)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: reportes-pruebas
+          path: |
+            reports/
+            coverage/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  build-deploy-staging:
+    name: 2. Build y despliegue de staging
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      JWT_SECRET: staging-${{ github.run_id }}
+      SEED_PASSWORD: ${{ secrets.SEED_PASSWORD || 'StagingDemo2026' }}
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v5
+
+      - name: Construir imagen Docker
+        run: docker build -t $IMAGE_NAME:${{ github.sha }} .
+
+      - name: Desplegar contenedor (staging en el runner)
+        run: |
+          docker run -d --name gesmedsys -p 8080:8080 \
+            -e JWT_SECRET -e SEED_PASSWORD \
+            -e APP_VERSION=${{ github.sha }} \
+            $IMAGE_NAME:${{ github.sha }}
+
+      - name: Prueba de humo
+        run: BASE_URL=http://localhost:8080 ./scripts/smoke-test.sh
+
+      - name: Logs del contenedor
+        if: always()
+        run: docker logs gesmedsys || true
+
+      - name: Exportar imagen como artefacto
+        run: docker save $IMAGE_NAME:${{ github.sha }} | gzip > gesmedsys-image.tar.gz
+
+      - name: Guardar imagen
+        uses: actions/upload-artifact@v4
+        with:
+          name: imagen-docker
+          path: gesmedsys-image.tar.gz
+          retention-days: 7
+
+  deploy-gcp:
+    name: 3. Despliegue a Google Cloud Run (opcional)
+    needs: build-deploy-staging
+    # Solo en main y cuando el repositorio tiene configurada la variable GCP_PROJECT_ID.
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.GCP_PROJECT_ID != ''
+    runs-on: ubuntu-latest
+    environment: produccion
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v5
+
+      - name: Autenticarse en Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Configurar gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Desplegar en Cloud Run
+        id: deploy
+        run: |
+          gcloud run deploy gesmedsys \
+            --project "${{ vars.GCP_PROJECT_ID }}" \
+            --region "${{ vars.GCP_REGION || 'us-central1' }}" \
+            --source . \
+            --allow-unauthenticated \
+            --set-env-vars APP_VERSION=${{ github.sha }} \
+            --set-secrets JWT_SECRET=jwt-secret:latest,SEED_PASSWORD=seed-password:latest \
+            --quiet
+          URL=$(gcloud run services describe gesmedsys \
+            --project "${{ vars.GCP_PROJECT_ID }}" \
+            --region "${{ vars.GCP_REGION || 'us-central1' }}" \
+            --format 'value(status.url)')
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Desplegado en: $URL" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Prueba de humo en producción
+        env:
+          BASE_URL: ${{ steps.deploy.outputs.url }}
+          SEED_PASSWORD: ${{ secrets.SEED_PASSWORD }}
+        run: ./scripts/smoke-test.sh
